@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Docx Parser and Editor</title>
+    <style>
+        body {
+            display: flex;
+            justify-content: space-between;
+            padding: 20px;
+        }
+        #upload-section, #editor-section {
+            width: 45%;
+        }
+        #editor {
+            width: 210mm;
+            height: 297mm;
+            border: 1px solid #ccc;
+            padding: 20mm;
+            box-sizing: border-box;
+            overflow: auto;
+        }
+        .bullet {
+            margin-left: 20px;
+            display: list-item;
+        }
+        table, td {
+            border-collapse: collapse;
+        }
+        td {
+            border: 1px solid #000;
+        }
+    </style>
+</head>
+<body>
+    <div id="upload-section">
+        <input type="file" id="upload" accept=".docx">
+    </div>
+    <div id="editor-section">
+        <div id="editor" class="a4-container" contenteditable="true"></div>
+        <button id="download">Download</button>
+    </div>
+    <script>
+        document.getElementById('upload').addEventListener('change', function (event) {
+            const file = event.target.files[0];
+            if (file) {
+                const formData = new FormData();
+                formData.append('file', file);
+
+                fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    displayContent(data);
+                })
+                .catch(error => console.error('Error uploading file:', error));
+            }
+        });
+
+        function displayContent(content) {
+            const editor = document.getElementById('editor');
+            editor.innerHTML = '';
+
+            content.forEach(item => {
+                if (item.type === 'paragraph') {
+                    const p = document.createElement('p');
+                    p.style.textAlign = item.alignment;
+
+                    if (item.is_bullet) {
+                        p.className = 'bullet';
+                        p.textContent = item.bullet_char;
+                    }
+
+                    item.text.forEach((text, index) => {
+                        const span = document.createElement('span');
+                        span.textContent = text;
+                        if (item.bold[index]) span.style.fontWeight = 'bold';
+                        if (item.italic[index]) span.style.fontStyle = 'italic';
+                        if (item.underline[index]) span.style.textDecoration = 'underline';
+                        if (item.font_size[index]) span.style.fontSize = `${item.font_size[index]}pt`;
+
+                        p.appendChild(span);
+                    });
+
+                    editor.appendChild(p);
+                } else if (item.type === 'table') {
+                    const table = document.createElement('table');
+                    item.rows.forEach((row, rowIndex) => {
+                        const tr = document.createElement('tr');
+                        row.forEach((cell, cellIndex) => {
+                            const td = document.createElement('td');
+                            td.textContent = cell;
+
+                            // Apply borders
+                            const borders = item.borders[rowIndex * row.length + cellIndex];
+                            if (borders) {
+                                for (const [borderName, borderProps] of Object.entries(borders)) {
+                                    const borderStyle = `${borderProps.sz / 8}px ${borderProps.val === 'single' ? 'solid' : borderProps.val} #${borderProps.color}`;
+                                    if (borderName === 'top') td.style.borderTop = borderStyle;
+                                    if (borderName === 'bottom') td.style.borderBottom = borderStyle;
+                                    if (borderName === 'left') td.style.borderLeft = borderStyle;
+                                    if (borderName === 'right') td.style.borderRight = borderStyle;
+                                }
+                            }
+                            tr.appendChild(td);
+                        });
+                        table.appendChild(tr);
+                    });
+                    editor.appendChild(table);
+                }
+            });
+        }
+
+        document.getElementById('download').addEventListener('click', function () {
+            const editorContent = parseEditorContent();
+
+            fetch('/download', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ content: editorContent })
+            })
+            .then(response => response.blob())
+            .then(blob => {
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'edited.docx';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            })
+            .catch(error => console.error('Error generating document:', error));
+        });
+
+        function parseEditorContent() {
+            const editor = document.getElementById('editor');
+            const content = [];
+
+            editor.childNodes.forEach(node => {
+                if (node.nodeName === 'P') {
+                    const paraContent = {
+                        type: 'paragraph',
+                        text: [],
+                        bold: [],
+                        italic: [],
+                        underline: [],
+                        font_size: [],
+                        alignment: node.style.textAlign || 'left',
+                        is_bullet: node.className === 'bullet',
+                        bullet_char: node.textContent.charAt(0)  // Assuming bullet character is the first character
+                    };
+
+                    node.childNodes.forEach(span => {
+                        paraContent.text.push(span.textContent);
+                        paraContent.bold.push(span.style.fontWeight === 'bold');
+                        paraContent.italic.push(span.style.fontStyle === 'italic');
+                        paraContent.underline.push(span.style.textDecoration === 'underline');
+                        paraContent.font_size.push(span.style.fontSize ? parseInt(span.style.fontSize) : null);
+                    });
+
+                    content.push(paraContent);
+                } else if (node.nodeName === 'TABLE') {
+                    const tableContent = {
+                        type: 'table',
+                        rows: [],
+                        borders: []
+                    };
+
+                    node.querySelectorAll('tr').forEach((tr, rowIndex) => {
+                        const row = [];
+                        tr.querySelectorAll('td').forEach((td, cellIndex) => {
+                            row.push(td.textContent);
+                            const styles = window.getComputedStyle(td);
+                            const borders = {
+                                top: styles.borderTop,
+                                bottom: styles.borderBottom,
+                                left: styles.borderLeft,
+                                right: styles.borderRight
+                            };
+                            tableContent.borders.push(borders);
+                        });
+                        tableContent.rows.push(row);
+                    });
+
+                    content.push(tableContent);
+                }
+            });
+
+            return content;
+        }
+    </script>
+</body>
+</html>

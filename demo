@@ -1,0 +1,286 @@
+from flask import Flask, request, render_template, send_from_directory, jsonify
+from werkzeug.utils import secure_filename
+import os
+from lxml import etree
+from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Pt
+
+app = Flask(__name__, template_folder='../templates')
+UPLOAD_FOLDER = os.path.join(app.root_path, '../static/uploads')
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+def parse_docx(file_path):
+    doc = Document(file_path)
+    content = []
+
+    for block in doc.element.body:
+        if block.tag.endswith('tbl'):
+            # Process table
+            table_content = {'type': 'table', 'rows': []}
+            table = block
+            for row in table.findall('.//w:tr', namespaces={'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}):
+                row_content = []
+                for cell in row.findall('.//w:tc', namespaces={'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}):
+                    cell_text = ''.join(cell.find('.//w:t', namespaces={'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}).itertext())
+                    row_content.append(cell_text)
+                table_content['rows'].append(row_content)
+            content.append(table_content)
+        elif block.tag.endswith('p'):
+            # Process paragraph
+            para_content = {
+                'type': 'paragraph',
+                'text': [],
+                'bold': [],
+                'italic': [],
+                'underline': [],
+                'font_size': [],
+                'alignment': ''
+            }
+            para = block
+            xml_str = etree.tostring(para).decode()
+            xml_tree = etree.fromstring(xml_str.encode('utf-8'))
+
+            alignment = xml_tree.xpath('.//w:pPr/w:jc/@w:val', namespaces={'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})
+            para_content['alignment'] = alignment[0] if alignment else 'left'
+
+            for run in xml_tree.xpath('.//w:r', namespaces={'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}):
+                text = ''.join(run.xpath('.//w:t/text()', namespaces={'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}))
+                bold = bool(run.xpath('.//w:b', namespaces={'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}))
+                italic = bool(run.xpath('.//w:i', namespaces={'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}))
+                underline = bool(run.xpath('.//w:u', namespaces={'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}))
+                font_size = run.xpath('.//w:sz/@w:val', namespaces={'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})
+                font_size = int(font_size[0]) / 2 if font_size else None
+
+                para_content['text'].append(text)
+                para_content['bold'].append(bold)
+                para_content['italic'].append(italic)
+                para_content['underline'].append(underline)
+                para_content['font_size'].append(font_size)
+
+            content.append(para_content)
+    return content
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return 'No file part'
+    file = request.files['file']
+    if file.filename == '':
+        return 'No selected file'
+    if file:
+        filename = secure_filename(file.filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(file_path)
+        content = parse_docx(file_path)
+        return jsonify(content)
+
+@app.route('/download', methods=['POST'])
+def download_file():
+    content = request.json.get('content')
+    doc = Document()
+
+    for item in content:
+        if item['type'] == 'table':
+            table = doc.add_table(rows=0, cols=len(item['rows'][0]))
+            for row_data in item['rows']:
+                row = table.add_row().cells
+                for i, cell_data in enumerate(row_data):
+                    row[i].text = cell_data
+        elif item['type'] == 'paragraph':
+            p = doc.add_paragraph()
+            if item['alignment'] == 'center':
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            elif item['alignment'] == 'right':
+                p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            elif item['alignment'] == 'both':
+                p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            else:
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+            for i, text in enumerate(item['text']):
+                run = p.add_run(text)
+                if item['bold'][i]:
+                    run.bold = True
+                if item['italic'][i]:
+                    run.italic = True
+                if item['underline'][i]:
+                    run.underline = True
+                if item['font_size'][i]:
+                    run.font.size = Pt(item['font_size'][i])
+
+    filename = 'edited.docx'
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    doc.save(file_path)
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename, as_attachment=True)
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Docx Parser and Editor</title>
+    <style>
+        body {
+            display: flex;
+            justify-content: space-between;
+            padding: 20px;
+        }
+        #upload-section, #editor-section {
+            width: 45%;
+        }
+        #editor {
+            width: 210mm;
+            height: 297mm;
+            border: 1px solid #ccc;
+            padding: 20mm;
+            box-sizing: border-box;
+            overflow: auto;
+        }
+    </style>
+</head>
+<body>
+    <div id="upload-section">
+        <input type="file" id="upload" accept=".docx">
+    </div>
+    <div id="editor-section">
+        <div id="editor" class="a4-container" contenteditable="true"></div>
+        <button id="download">Download</button>
+    </div>
+    <script>
+        document.getElementById('upload').addEventListener('change', function (event) {
+            const file = event.target.files[0];
+            if (file) {
+                const formData = new FormData();
+                formData.append('file', file);
+
+                fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    displayContent(data);
+                })
+                .catch(error => console.error('Error uploading file:', error));
+            }
+        });
+
+        function displayContent(content) {
+            const editor = document.getElementById('editor');
+            editor.innerHTML = '';
+
+            content.forEach(item => {
+                if (item.type === 'paragraph') {
+                    const p = document.createElement('p');
+                    p.style.textAlign = item.alignment;
+
+                    item.text.forEach((text, index) => {
+                        const span = document.createElement('span');
+                        span.textContent = text;
+                        if (item.bold[index]) span.style.fontWeight = 'bold';
+                        if (item.italic[index]) span.style.fontStyle = 'italic';
+                        if (item.underline[index]) span.style.textDecoration = 'underline';
+                        if (item.font_size[index]) span.style.fontSize = `${item.font_size[index]}pt`;
+
+                        p.appendChild(span);
+                    });
+
+                    editor.appendChild(p);
+                } else if (item.type === 'table') {
+                    const table = document.createElement('table');
+                    item.rows.forEach(row => {
+                        const tr = document.createElement('tr');
+                        row.forEach(cell => {
+                            const td = document.createElement('td');
+                            td.textContent = cell;
+                            tr.appendChild(td);
+                        });
+                        table.appendChild(tr);
+                    });
+                    editor.appendChild(table);
+                }
+            });
+        }
+
+        document.getElementById('download').addEventListener('click', function () {
+            const editorContent = parseEditorContent();
+
+            fetch('/download', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ content: editorContent }),
+            })
+            .then(response => response.blob())
+            .then(blob => {
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'edited.docx';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            })
+            .catch(error => console.error('Error generating document:', error));
+        });
+
+        function parseEditorContent() {
+            const editor = document.getElementById('editor');
+            const content = [];
+
+            editor.childNodes.forEach(node => {
+                if (node.nodeName === 'P') {
+                    const paraContent = {
+                        type: 'paragraph',
+                        text: [],
+                        bold: [],
+                        italic: [],
+                        underline: [],
+                        font_size: [],
+                        alignment: node.style.textAlign || 'left'
+                    };
+
+                    node.childNodes.forEach(span => {
+                        paraContent.text.push(span.textContent);
+                        paraContent.bold.push(span.style.fontWeight === 'bold');
+                        paraContent.italic.push(span.style.fontStyle === 'italic');
+                        paraContent.underline.push(span.style.textDecoration === 'underline');
+                        paraContent.font_size.push(span.style.fontSize ? parseInt(span.style.fontSize) : null);
+                    });
+
+                    content.push(paraContent);
+                } else if (node.nodeName === 'TABLE') {
+                    const tableContent = {
+                        type: 'table',
+                        rows: []
+                    };
+
+                    node.querySelectorAll('tr').forEach(tr => {
+                        const row = [];
+                        tr.querySelectorAll('td').forEach(td => {
+                            row.push(td.textContent);
+                        });
+                        tableContent.rows.push(row);
+                    });
+
+                    content.push(tableContent);
+                }
+            });
+
+            return content;
+        }
+    </script>
+</body>
+</html>
